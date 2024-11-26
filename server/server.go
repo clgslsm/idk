@@ -4,8 +4,17 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"strings"
 )
 
+// Simulated data store for the server
+var pieces = map[string]string{
+	"piece1": "This is data for piece 1.",
+	"piece2": "This is data for piece 2.",
+	"piece3": "This is data for piece 3.",
+}
+
+// StartServer initializes the server to handle peer requests.
 func StartServer(address string) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
@@ -30,17 +39,63 @@ func StartServer(address string) error {
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	// Read data from the peer
+	// Create a buffered reader to process incoming data
 	reader := bufio.NewReader(conn)
-	message, err := reader.ReadString('\n')
-	if err != nil {
-		fmt.Printf("Error reading from connection: %v\n", err)
+
+	for {
+		// Read client request
+		message, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Printf("Error reading from connection: %v\n", err)
+			return
+		}
+		message = strings.TrimSpace(message)
+
+		// Process the message based on its type
+		switch {
+		case strings.HasPrefix(message, "HANDSHAKE:"):
+			handleHandshake(conn, message)
+
+		case message == "CHECK_PIECES":
+			handlePieceAvailability(conn)
+
+		case strings.HasPrefix(message, "Requesting piece:"):
+			handlePieceRequest(conn, message)
+
+		default:
+			fmt.Printf("Unknown message: %s\n", message)
+			conn.Write([]byte("ERROR: Unknown message\n"))
+		}
+	}
+}
+
+func handleHandshake(conn net.Conn, message string) {
+	fmt.Printf("Received handshake message: %s\n", message)
+
+	// Respond to the handshake
+	conn.Write([]byte("OK\n"))
+}
+
+func handlePieceAvailability(conn net.Conn) {
+	fmt.Println("Received piece availability request")
+
+	// Simulate the server has all pieces
+	conn.Write([]byte("HAVE_PIECES\n"))
+}
+
+func handlePieceRequest(conn net.Conn, message string) {
+	fmt.Printf("Received piece request: %s\n", message)
+
+	// Extract the requested piece from the message
+	pieceKey := strings.TrimPrefix(message, "Requesting piece: ")
+	pieceData, found := pieces[pieceKey]
+	if !found {
+		// If the requested piece is not found, respond with an error
+		conn.Write([]byte("ERROR: Piece not found\n"))
 		return
 	}
 
-	// Example: Log received message
-	fmt.Printf("Received: %s", message)
-
-	// Respond to the peer
-	conn.Write([]byte("Message received\n"))
+	// Send the piece data to the client
+	conn.Write([]byte(pieceData + "\n"))
+	fmt.Printf("Sent piece data for %s\n", pieceKey)
 }
