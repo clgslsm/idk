@@ -13,7 +13,6 @@ import (
 )
 
 func main() {
-	// Start the server in a goroutine
 	go func() {
 		err := server.StartServer(":8080")
 		if err != nil {
@@ -21,7 +20,6 @@ func main() {
 		}
 	}()
 
-	// Interactive CLI
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Println("Torrent Simulation App")
 	fmt.Println("Commands:")
@@ -38,6 +36,14 @@ func main() {
 
 		// Handle commands
 		switch {
+		case strings.HasPrefix(commandLine, "seed"):
+			args := strings.Split(commandLine, " ")
+			if len(args) < 2 {
+				fmt.Println("Usage: seed [torrent-file]")
+				continue
+			}
+			torrentFile := args[1]
+			server.StartServer(torrentFile)
 		case strings.HasPrefix(commandLine, "download"):
 			args := strings.Split(commandLine, " ")
 			if len(args) < 2 {

@@ -4,10 +4,24 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"os"
+	"sync"
 	"time"
 
 	"tcp-app/torrent"
 )
+
+type PieceWork struct {
+	Index int
+	Hash  []byte
+	Size  int64
+}
+
+type PieceResult struct {
+	Index int
+	Data  string
+	Error error
+}
 
 func StartDownload(torrentFile string) {
 	fmt.Println("Starting download for:", torrentFile)
@@ -20,7 +34,7 @@ func StartDownload(torrentFile string) {
 	}
 
 	// Mock the list of peers
-	peers := []string{"192.168.0.107:8080"}
+	peers := []string{"192.168.68.151:8080"}
 
 	// First, test connection and handshake with peers
 	var activePeers []string
@@ -35,22 +49,8 @@ func StartDownload(torrentFile string) {
 			fmt.Printf("Handshake failed with peer %s: %v\n", peer, err)
 			continue
 		}
-		// Convert tf.PieceHashes from [][20]byte to [][]byte
-		var pieceHashes [][]byte
-		for _, hash := range tf.PieceHashes {
-			pieceHashes = append(pieceHashes, hash[:])
-		}
 
-		// Check if peer has the file
-		hasPieces, err := checkPieceAvailability(peer, pieceHashes)
-		if err != nil {
-			fmt.Printf("Failed to check pieces for peer %s: %v\n", peer, err)
-			continue
-		}
-
-		if hasPieces {
-			activePeers = append(activePeers, peer)
-		}
+		activePeers = append(activePeers, peer)
 	}
 
 	if len(activePeers) == 0 {
@@ -58,45 +58,118 @@ func StartDownload(torrentFile string) {
 		return
 	}
 
-	// Download pieces from active peers
-	for i, pieceHash := range tf.PieceHashes {
-		fmt.Printf("Downloading piece %d (hash: %x)...\n", i, pieceHash)
-		err := requestPieceFromPeer(activePeers[0], fmt.Sprintf("%x", pieceHash))
-		if err != nil {
-			fmt.Printf("Error downloading piece %d: %v\n", i, err)
-		} else {
-			fmt.Printf("Successfully downloaded piece %d\n", i)
-		}
+	// Create channels for the worker pool
+	const numWorkers = 3
+	workQueue := make(chan PieceWork, len(tf.PieceHashes))
+	results := make(chan PieceResult, len(tf.PieceHashes))
 
-		time.Sleep(1 * time.Second) // Simulated delay
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			downloadWorker(activePeers[0], workQueue, results)
+		}()
+	}
+
+	// Queue pieces to download
+	sizeToDownload := tf.Length
+	for i, pieceHash := range tf.PieceHashes {
+		sizePieceToDownload := min(tf.PieceLength, sizeToDownload)
+		sizeToDownload -= sizePieceToDownload
+
+		workQueue <- PieceWork{
+			Index: i,
+			Hash:  pieceHash[:],
+			Size:  int64(sizePieceToDownload),
+		}
+	}
+	close(workQueue)
+
+	// Wait for workers to complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results and merge file
+	piecesByIndex := make(map[int]string)
+	for result := range results {
+		if result.Error != nil {
+			fmt.Printf("Error downloading piece %d: %v\n", result.Index, result.Error)
+			continue
+		}
+		piecesByIndex[result.Index] = result.Data
+		fmt.Printf("Successfully downloaded piece %d\n", result.Index)
+	}
+
+	// Merge pieces into final file
+	if err := mergePieces(tf.Name, piecesByIndex, len(tf.PieceHashes)); err != nil {
+		fmt.Printf("Error merging pieces: %v\n", err)
+		return
 	}
 
 	fmt.Println("Download complete!")
 }
 
-func requestPieceFromPeer(address, piece string) error {
+func downloadWorker(peer string, work <-chan PieceWork, results chan<- PieceResult) {
+	for piece := range work {
+		data, err := requestPieceFromPeer(peer, fmt.Sprintf("%d:%x:%d",
+			piece.Index, piece.Hash, piece.Size))
+
+		results <- PieceResult{
+			Index: piece.Index,
+			Data:  data,
+			Error: err,
+		}
+	}
+}
+
+func mergePieces(fileName string, pieces map[int]string, numPieces int) error {
+	file, err := os.Create(fileName)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %v", err)
+	}
+	defer file.Close()
+
+	// Write pieces in order
+	for i := 0; i < numPieces; i++ {
+		data, exists := pieces[i]
+		if !exists {
+			return fmt.Errorf("missing piece %d", i)
+		}
+		if _, err := file.WriteString(data); err != nil {
+			return fmt.Errorf("failed to write piece %d: %v", i, err)
+		}
+	}
+
+	return nil
+}
+
+func requestPieceFromPeer(address, message string) (string, error) {
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
-		return fmt.Errorf("error connecting to peer: %v", err)
+		return "", fmt.Errorf("error connecting to peer: %v", err)
 	}
 	defer conn.Close()
 
+	message = "Requesting piece: " + message
 	// Send request for the piece
-	message := fmt.Sprintf("Requesting piece: %s\n", piece)
 	_, err = conn.Write([]byte(message))
 	if err != nil {
-		return fmt.Errorf("error sending request: %v", err)
+		return "", fmt.Errorf("error sending request: %v", err)
 	}
 
 	// Read response from the peer
 	reader := bufio.NewReader(conn)
 	response, err := reader.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("error reading response: %v", err)
+		return "", fmt.Errorf("error reading response: %v", err)
 	}
 
 	fmt.Printf("Response from peer: %s", response)
-	return nil
+	return response, nil
 }
 
 func TestConnection(address string) error {
@@ -152,27 +225,4 @@ func performHandshake(address string, infoHash []byte) error {
 	}
 
 	return nil
-}
-
-func checkPieceAvailability(address string, pieceHashes [][]byte) (bool, error) {
-	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
-	if err != nil {
-		return false, fmt.Errorf("availability check connection failed: %v", err)
-	}
-	defer conn.Close()
-
-	// Send availability check message
-	checkMsg := "CHECK_PIECES\n"
-	if _, err := conn.Write([]byte(checkMsg)); err != nil {
-		return false, fmt.Errorf("failed to send piece check request: %v", err)
-	}
-
-	// Read response
-	reader := bufio.NewReader(conn)
-	response, err := reader.ReadString('\n')
-	if err != nil {
-		return false, fmt.Errorf("failed to read piece availability: %v", err)
-	}
-
-	return response == "HAVE_PIECES\n", nil
 }

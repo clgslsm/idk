@@ -3,6 +3,7 @@ package torrent
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -37,7 +38,6 @@ type bencodeTorrent struct {
 
 // Open parses a torrent file
 func Open(path string) (TorrentFile, error) {
-	fmt.Println(path)
 	file, err := os.Open(path)
 	if err != nil {
 		return TorrentFile{}, err
@@ -179,5 +179,66 @@ func Create(path string) (torrentPath string, err error) {
 	if err != nil {
 		return "", err
 	}
+
+	torrentInfo := map[string]string{
+		"FilePath": path,
+		"FileName": torrentFile.Name,
+		"InfoHash": fmt.Sprintf("%x", torrentFile.InfoHash), // Convert to hex string
+	}
+	jsonData, err := json.Marshal(torrentInfo)
+	if err != nil {
+		return "", err
+	}
+	err = os.WriteFile("torrent_info.json", jsonData, 0644)
+	if err != nil {
+		return "", err
+	}
 	return torrentFileName, nil
+}
+
+func (t *TorrentFile) ReadPiece(index int) ([]byte, error) {
+	// Validate piece index
+	if index < 0 || index >= len(t.PieceHashes) {
+		return nil, fmt.Errorf("invalid piece index %d", index)
+	}
+
+	// Open the underlying file
+	file, err := os.Open(t.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Calculate piece size and offset
+	pieceOffset := int64(index * t.PieceLength)
+	pieceSize := t.PieceLength
+
+	// Handle last piece, which might be smaller
+	if index == len(t.PieceHashes)-1 {
+		lastPieceSize := t.Length - (index * t.PieceLength)
+		if lastPieceSize < pieceSize {
+			pieceSize = lastPieceSize
+		}
+	}
+
+	// Seek to the piece location
+	_, err = file.Seek(pieceOffset, io.SeekStart)
+	if err != nil {
+		return nil, err
+	}
+
+	// Read the piece
+	piece := make([]byte, pieceSize)
+	n, err := io.ReadFull(file, piece)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+
+	// Verify piece hash
+	hash := sha1.Sum(piece[:n])
+	if !bytes.Equal(hash[:], t.PieceHashes[index][:]) {
+		return nil, fmt.Errorf("piece %d failed hash verification", index)
+	}
+
+	return piece[:n], nil
 }

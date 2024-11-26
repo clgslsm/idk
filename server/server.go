@@ -2,16 +2,71 @@ package server
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
 	"strings"
 )
 
-// Simulated data store for the server
-var pieces = map[string]string{
-	"piece1": "This is data for piece 1.",
-	"piece2": "This is data for piece 2.",
-	"piece3": "This is data for piece 3.",
+// pieceSize = 256KB
+const pieceSize = 256 * 1024
+
+// FileWorker handles the file pieces for a specific torrent
+type FileWorker struct {
+	filePath    string
+	pieces      [][]byte
+	numPieces   int
+	pieceHashes []string
+}
+
+// NewFileWorker creates and initializes a new FileWorker
+func NewFileWorker(filePath string) (*FileWorker, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("error opening file: %v", err)
+	}
+	defer file.Close()
+
+	// Get file size
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("error getting file info: %v", err)
+	}
+
+	// Calculate number of pieces
+	numPieces := int((fileInfo.Size() + pieceSize - 1) / pieceSize)
+	pieces := make([][]byte, numPieces)
+	pieceHashes := make([]string, numPieces)
+
+	// Read file into pieces
+	for i := 0; i < numPieces; i++ {
+		piece := make([]byte, pieceSize)
+		n, err := file.ReadAt(piece, int64(i*pieceSize))
+		if err != nil && err.Error() != "EOF" {
+			return nil, fmt.Errorf("error reading piece %d: %v", i, err)
+		}
+
+		// Trim the last piece if needed
+		if n < pieceSize {
+			piece = piece[:n]
+		}
+
+		pieces[i] = piece
+		// Calculate hash for the piece
+		hash := sha256.Sum256(piece)
+		pieceHashes[i] = hex.EncodeToString(hash[:])
+	}
+
+	return &FileWorker{
+		filePath:    filePath,
+		pieces:      pieces,
+		numPieces:   numPieces,
+		pieceHashes: pieceHashes,
+	}, nil
 }
 
 // StartServer initializes the server to handle peer requests.
@@ -38,6 +93,7 @@ func StartServer(address string) error {
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
+	var worker *FileWorker
 
 	// Create a buffered reader to process incoming data
 	reader := bufio.NewReader(conn)
@@ -54,13 +110,17 @@ func handleConnection(conn net.Conn) {
 		// Process the message based on its type
 		switch {
 		case strings.HasPrefix(message, "HANDSHAKE:"):
-			handleHandshake(conn, message)
-
-		case message == "CHECK_PIECES":
-			handlePieceAvailability(conn)
+			worker = handleHandshake(conn, message)
+			if worker == nil {
+				return
+			}
 
 		case strings.HasPrefix(message, "Requesting piece:"):
-			handlePieceRequest(conn, message)
+			if worker == nil {
+				conn.Write([]byte("ERROR: Handshake required\n"))
+				continue
+			}
+			handlePieceRequest(conn, message, worker)
 
 		default:
 			fmt.Printf("Unknown message: %s\n", message)
@@ -69,33 +129,61 @@ func handleConnection(conn net.Conn) {
 	}
 }
 
-func handleHandshake(conn net.Conn, message string) {
+func handleHandshake(conn net.Conn, message string) *FileWorker {
 	fmt.Printf("Received handshake message: %s\n", message)
+	// Get the info hash from the message
+	infoHashMessage := strings.TrimPrefix(message, "HANDSHAKE:")
+	// Check if the info hash is in the torrent_info.json file
+	torrentInfo, err := os.ReadFile("torrent_info.json")
+	if err != nil {
+		fmt.Printf("Error reading torrent_info.json: %v\n", err)
+		return nil
+	}
+	var torrentInfoMap map[string]string
+	err = json.Unmarshal(torrentInfo, &torrentInfoMap)
+	if err != nil {
+		fmt.Printf("Error unmarshalling torrent_info.json: %v\n", err)
+		return nil
+	}
+	infoHash := torrentInfoMap["InfoHash"]
+	if infoHash != infoHashMessage {
+		fmt.Printf("Info hash mismatch: %s != %s\n", infoHash, infoHashMessage)
+		return nil
+	}
+	filePath := torrentInfoMap["FilePath"]
+	fmt.Printf("File path: %s\n", filePath)
+	// Create worker for the file
+	worker, err := NewFileWorker(filePath)
+	if err != nil {
+		fmt.Printf("Error creating file worker: %v\n", err)
+		conn.Write([]byte("ERROR: Unable to process file\n"))
+		return nil
+	}
 
-	// Respond to the handshake
 	conn.Write([]byte("OK\n"))
+	return worker
 }
 
-func handlePieceAvailability(conn net.Conn) {
-	fmt.Println("Received piece availability request")
-
-	// Simulate the server has all pieces
-	conn.Write([]byte("HAVE_PIECES\n"))
-}
-
-func handlePieceRequest(conn net.Conn, message string) {
+func handlePieceRequest(conn net.Conn, message string, worker *FileWorker) {
 	fmt.Printf("Received piece request: %s\n", message)
 
-	// Extract the requested piece from the message
-	pieceKey := strings.TrimPrefix(message, "Requesting piece: ")
-	pieceData, found := pieces[pieceKey]
-	if !found {
-		// If the requested piece is not found, respond with an error
-		conn.Write([]byte("ERROR: Piece not found\n"))
+	// Extract the piece index from the message
+	// Message format: "Requesting piece: <index>"
+	parts := strings.Split(message, ":")
+	if len(parts) != 2 {
+		conn.Write([]byte("ERROR: Invalid request format\n"))
+		return
+	}
+
+	index := strings.TrimSpace(parts[1])
+	pieceIndex, err := strconv.Atoi(index)
+	if err != nil || pieceIndex < 0 || pieceIndex >= worker.numPieces {
+		conn.Write([]byte("ERROR: Invalid piece index\n"))
 		return
 	}
 
 	// Send the piece data to the client
-	conn.Write([]byte(pieceData + "\n"))
-	fmt.Printf("Sent piece data for %s\n", pieceKey)
+	response := fmt.Sprintf("%s:%s\n", worker.pieceHashes[pieceIndex], string(worker.pieces[pieceIndex]))
+	conn.Write([]byte(response))
+	fmt.Printf("Sent piece data for index %d\n", pieceIndex)
 }
