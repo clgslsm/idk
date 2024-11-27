@@ -210,7 +210,9 @@ func Create(path string) (torrentPath string, err error) {
 	torrentInfo := map[string]string{
 		"FilePath": path,
 		"FileName": torrentFile.Name,
-		"InfoHash": fmt.Sprintf("%x", torrentFile.InfoHash), // Convert to hex string
+		"InfoHash": fmt.Sprintf("%x", torrentFile.InfoHash),
+		// Print the list of piece hashes
+		"PieceHashes": fmt.Sprintf("%x", torrentFile.PieceHashes),
 	}
 	jsonData, err := json.Marshal(torrentInfo)
 	if err != nil {

@@ -2,6 +2,8 @@ package client
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha1"
 	"fmt"
 	"net"
 	"sync"
@@ -92,6 +94,11 @@ func StartDownload(torrentFile string) {
 			continue
 		}
 		piecesByIndex[result.Index] = string(result.Data)
+		// Validate the piece hash
+		calculatedHash := sha1.Sum(result.Data)
+		if !bytes.Equal(calculatedHash[:], tf.PieceHashes[result.Index][:]) {
+			fmt.Printf("Piece %d hash mismatch!\n", result.Index)
+		}
 		fmt.Printf("Successfully downloaded piece %d\n", result.Index)
 	}
 
@@ -130,7 +137,7 @@ func requestPieceFromPeer(address string, pieceIndex int, infoHash []byte) ([]by
 	}
 
 	// Request the piece
-	message := fmt.Sprintf("Requesting piece:%d:%x\n", pieceIndex, infoHash)
+	message := fmt.Sprintf("Requesting:%d:%x\n", pieceIndex, infoHash)
 	if _, err := conn.Write([]byte(message)); err != nil {
 		return nil, fmt.Errorf("error sending request: %v", err)
 	}

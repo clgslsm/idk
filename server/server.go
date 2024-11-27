@@ -44,6 +44,7 @@ func NewFileWorker(filePath string) (*FileWorker, error) {
 	pieceHashes := make([][20]byte, len(pieces))
 	for i, piece := range pieces {
 		pieceHashes[i] = sha1.Sum(piece)
+		fmt.Printf("Piece %d hash: %x\n", i, pieceHashes[i])
 	}
 
 	return &FileWorker{
@@ -108,10 +109,9 @@ func handleConnection(conn net.Conn) {
 			// Store the worker in the global map using info hash
 			connectionWorkers[infoHash] = worker
 
-		case strings.HasPrefix(message, "Requesting piece:"):
-			fmt.Printf("Received piece request: %s\n", message)
+		case strings.HasPrefix(message, "Requesting"):
 			parts := strings.Split(message, ":")
-			infoHash := parts[2]
+			infoHash := parts[1]
 			worker, exists := connectionWorkers[infoHash]
 			if !exists || worker == nil {
 				conn.Write([]byte("ERROR: Handshake required\n"))
@@ -127,7 +127,6 @@ func handleConnection(conn net.Conn) {
 }
 
 func handleHandshake(conn net.Conn, message string) (string, *FileWorker) {
-	fmt.Printf("Received handshake message: %s\n", message)
 	// Get the info hash from the message
 	infoHashMessage := strings.TrimPrefix(message, "HANDSHAKE:")
 	// Check if the info hash is in the torrent_info.json file
@@ -148,7 +147,6 @@ func handleHandshake(conn net.Conn, message string) (string, *FileWorker) {
 		return "", nil
 	}
 	filePath := torrentInfoMap["FilePath"]
-	fmt.Printf("File path: %s\n", filePath)
 	// Create worker for the file
 	worker, err := NewFileWorker(filePath)
 	if err != nil {
@@ -158,12 +156,12 @@ func handleHandshake(conn net.Conn, message string) (string, *FileWorker) {
 	}
 
 	conn.Write([]byte("OK\n"))
-	fmt.Printf("File worker created for file: %s\n", filePath)
 	return infoHash, worker
 }
 
 func handlePieceRequest(conn net.Conn, message string, worker *FileWorker) {
 	parts := strings.Split(message, ":")
+	fmt.Printf("Parts: %v\n", parts)
 	if len(parts) != 3 {
 		conn.Write([]byte("ERROR: Invalid request format\n"))
 		return
