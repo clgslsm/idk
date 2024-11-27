@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"crypto/sha1"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -44,7 +45,6 @@ func NewFileWorker(filePath string) (*FileWorker, error) {
 	pieceHashes := make([][20]byte, len(pieces))
 	for i, piece := range pieces {
 		pieceHashes[i] = sha1.Sum(piece)
-		fmt.Printf("Piece %d hash: %x\n", i, pieceHashes[i])
 	}
 
 	return &FileWorker{
@@ -117,6 +117,7 @@ func handleConnection(conn net.Conn) {
 				conn.Write([]byte("ERROR: Handshake required\n"))
 				continue
 			}
+			fmt.Printf("Received piece request: %s\n", message)
 			handlePieceRequest(conn, message, worker)
 
 		default:
@@ -161,20 +162,24 @@ func handleHandshake(conn net.Conn, message string) (string, *FileWorker) {
 
 func handlePieceRequest(conn net.Conn, message string, worker *FileWorker) {
 	parts := strings.Split(message, ":")
-	fmt.Printf("Parts: %v\n", parts)
 	if len(parts) != 3 {
 		conn.Write([]byte("ERROR: Invalid request format\n"))
 		return
 	}
 
-	index := strings.TrimSpace(parts[1])
+	index := strings.TrimSpace(parts[2])
 	pieceIndex, err := strconv.Atoi(index)
 	if err != nil || pieceIndex < 0 || pieceIndex >= worker.numPieces {
 		conn.Write([]byte("ERROR: Invalid piece index\n"))
 		return
 	}
 
-	// Send the piece data with a delimiter
-	conn.Write(append(worker.pieces[pieceIndex], '\n'))
-	fmt.Printf("Sent piece data for index %d\n", pieceIndex)
+	// First send the piece size as a fixed-length header (8 bytes)
+	pieceSize := len(worker.pieces[pieceIndex])
+	sizeHeader := make([]byte, 8)
+	binary.BigEndian.PutUint64(sizeHeader, uint64(pieceSize))
+
+	// Send size header followed by piece data
+	conn.Write(sizeHeader)
+	conn.Write(worker.pieces[pieceIndex])
 }

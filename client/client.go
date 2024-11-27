@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -137,20 +139,25 @@ func requestPieceFromPeer(address string, pieceIndex int, infoHash []byte) ([]by
 	}
 
 	// Request the piece
-	message := fmt.Sprintf("Requesting:%d:%x\n", pieceIndex, infoHash)
+	message := fmt.Sprintf("Requesting:%x:%d\n", infoHash, pieceIndex)
 	if _, err := conn.Write([]byte(message)); err != nil {
 		return nil, fmt.Errorf("error sending request: %v", err)
 	}
 
-	// Read the piece data
-	reader := bufio.NewReader(conn)
-	data, err := reader.ReadBytes('\n')
-	if err != nil {
+	// Read the piece size first (8 bytes)
+	sizeHeader := make([]byte, 8)
+	if _, err := io.ReadFull(conn, sizeHeader); err != nil {
+		return nil, fmt.Errorf("error reading piece size: %v", err)
+	}
+	pieceSize := binary.BigEndian.Uint64(sizeHeader)
+
+	// Read the exact number of bytes for the piece
+	data := make([]byte, pieceSize)
+	if _, err := io.ReadFull(conn, data); err != nil {
 		return nil, fmt.Errorf("error reading piece data: %v", err)
 	}
 
-	// Remove the trailing newline
-	return data[:len(data)-1], nil
+	return data, nil
 }
 
 func TestConnection(address string) error {
