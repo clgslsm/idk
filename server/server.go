@@ -2,7 +2,7 @@ package server
 
 import (
 	"bufio"
-	"crypto/sha256"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"tcp-app/torrent"
 )
 
 // pieceSize = 256KB
@@ -25,39 +26,18 @@ type FileWorker struct {
 
 // NewFileWorker creates and initializes a new FileWorker
 func NewFileWorker(filePath string) (*FileWorker, error) {
-	file, err := os.Open(filePath)
+	// Get pieces using the StreamFilePieces function
+	pieces, err := torrent.StreamFilePieces(filePath, pieceSize)
 	if err != nil {
-		return nil, fmt.Errorf("error opening file: %v", err)
-	}
-	defer file.Close()
-
-	// Get file size
-	fileInfo, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("error getting file info: %v", err)
+		return nil, fmt.Errorf("error streaming file pieces: %v", err)
 	}
 
-	// Calculate number of pieces
-	numPieces := int((fileInfo.Size() + pieceSize - 1) / pieceSize)
-	pieces := make([][]byte, numPieces)
+	numPieces := len(pieces)
 	pieceHashes := make([]string, numPieces)
 
-	// Read file into pieces
-	for i := 0; i < numPieces; i++ {
-		piece := make([]byte, pieceSize)
-		n, err := file.ReadAt(piece, int64(i*pieceSize))
-		if err != nil && err.Error() != "EOF" {
-			return nil, fmt.Errorf("error reading piece %d: %v", i, err)
-		}
-
-		// Trim the last piece if needed
-		if n < pieceSize {
-			piece = piece[:n]
-		}
-
-		pieces[i] = piece
-		// Calculate hash for the piece
-		hash := sha256.Sum256(piece)
+	// Calculate hashes for verification purposes
+	for i, piece := range pieces {
+		hash := sha1.Sum(piece)
 		pieceHashes[i] = hex.EncodeToString(hash[:])
 	}
 
@@ -91,9 +71,11 @@ func StartServer(address string) error {
 	}
 }
 
+// Global map to store workers associated with info hashes
+var connectionWorkers = make(map[string]*FileWorker)
+
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
-	var worker *FileWorker
 
 	// Create a buffered reader to process incoming data
 	reader := bufio.NewReader(conn)
@@ -106,17 +88,27 @@ func handleConnection(conn net.Conn) {
 			return
 		}
 		message = strings.TrimSpace(message)
+		fmt.Printf("Received message: %s\n", message)
 
 		// Process the message based on its type
 		switch {
+		case strings.HasPrefix(message, "test:"):
+			fmt.Printf("Received test message: %s\n", message)
+			conn.Write([]byte("OK\n"))
 		case strings.HasPrefix(message, "HANDSHAKE:"):
-			worker = handleHandshake(conn, message)
+			infoHash, worker := handleHandshake(conn, message)
 			if worker == nil {
 				return
 			}
+			// Store the worker in the global map using info hash
+			connectionWorkers[infoHash] = worker
 
 		case strings.HasPrefix(message, "Requesting piece:"):
-			if worker == nil {
+			fmt.Printf("Received piece request: %s\n", message)
+			parts := strings.Split(message, ":")
+			infoHash := parts[2]
+			worker, exists := connectionWorkers[infoHash]
+			if !exists || worker == nil {
 				conn.Write([]byte("ERROR: Handshake required\n"))
 				continue
 			}
@@ -129,7 +121,7 @@ func handleConnection(conn net.Conn) {
 	}
 }
 
-func handleHandshake(conn net.Conn, message string) *FileWorker {
+func handleHandshake(conn net.Conn, message string) (string, *FileWorker) {
 	fmt.Printf("Received handshake message: %s\n", message)
 	// Get the info hash from the message
 	infoHashMessage := strings.TrimPrefix(message, "HANDSHAKE:")
@@ -137,18 +129,18 @@ func handleHandshake(conn net.Conn, message string) *FileWorker {
 	torrentInfo, err := os.ReadFile("torrent_info.json")
 	if err != nil {
 		fmt.Printf("Error reading torrent_info.json: %v\n", err)
-		return nil
+		return "", nil
 	}
 	var torrentInfoMap map[string]string
 	err = json.Unmarshal(torrentInfo, &torrentInfoMap)
 	if err != nil {
 		fmt.Printf("Error unmarshalling torrent_info.json: %v\n", err)
-		return nil
+		return "", nil
 	}
 	infoHash := torrentInfoMap["InfoHash"]
 	if infoHash != infoHashMessage {
 		fmt.Printf("Info hash mismatch: %s != %s\n", infoHash, infoHashMessage)
-		return nil
+		return "", nil
 	}
 	filePath := torrentInfoMap["FilePath"]
 	fmt.Printf("File path: %s\n", filePath)
@@ -157,18 +149,17 @@ func handleHandshake(conn net.Conn, message string) *FileWorker {
 	if err != nil {
 		fmt.Printf("Error creating file worker: %v\n", err)
 		conn.Write([]byte("ERROR: Unable to process file\n"))
-		return nil
+		return "", nil
 	}
 
 	conn.Write([]byte("OK\n"))
-	return worker
+	fmt.Printf("File worker created for file: %s\n", filePath)
+	return infoHash, worker
 }
 
 func handlePieceRequest(conn net.Conn, message string, worker *FileWorker) {
 	fmt.Printf("Received piece request: %s\n", message)
 
-	// Extract the piece index from the message
-	// Message format: "Requesting piece: <index>"
 	parts := strings.Split(message, ":")
 	if len(parts) != 2 {
 		conn.Write([]byte("ERROR: Invalid request format\n"))
@@ -182,8 +173,7 @@ func handlePieceRequest(conn net.Conn, message string, worker *FileWorker) {
 		return
 	}
 
-	// Send the piece data to the client
-	response := fmt.Sprintf("%s:%s\n", worker.pieceHashes[pieceIndex], string(worker.pieces[pieceIndex]))
-	conn.Write([]byte(response))
+	// Send only the piece data to the client
+	conn.Write(worker.pieces[pieceIndex])
 	fmt.Printf("Sent piece data for index %d\n", pieceIndex)
 }

@@ -63,29 +63,21 @@ func StartDownload(torrentFile string) {
 	workQueue := make(chan PieceWork, len(tf.PieceHashes))
 	results := make(chan PieceResult, len(tf.PieceHashes))
 
+	// Enqueue work
+	for i, hash := range tf.PieceHashes {
+		workQueue <- PieceWork{Index: i, Hash: hash[:], Size: int64(tf.PieceLength)}
+	}
+	close(workQueue) // Close after enqueuing all work
+
 	// Start workers
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			downloadWorker(activePeers[0], workQueue, results)
+			downloadWorker(activePeers[0], workQueue, results, tf.InfoHash[:])
 		}()
 	}
-
-	// Queue pieces to download
-	sizeToDownload := tf.Length
-	for i, pieceHash := range tf.PieceHashes {
-		sizePieceToDownload := min(tf.PieceLength, sizeToDownload)
-		sizeToDownload -= sizePieceToDownload
-
-		workQueue <- PieceWork{
-			Index: i,
-			Hash:  pieceHash[:],
-			Size:  int64(sizePieceToDownload),
-		}
-	}
-	close(workQueue)
 
 	// Wait for workers to complete
 	go func() {
@@ -113,10 +105,10 @@ func StartDownload(torrentFile string) {
 	fmt.Println("Download complete!")
 }
 
-func downloadWorker(peer string, work <-chan PieceWork, results chan<- PieceResult) {
+func downloadWorker(peer string, work <-chan PieceWork, results chan<- PieceResult, infoHash []byte) {
 	for piece := range work {
-		data, err := requestPieceFromPeer(peer, fmt.Sprintf("%d:%x:%d",
-			piece.Index, piece.Hash, piece.Size))
+		fmt.Printf("Downloading piece %d from peer %s\n", piece.Index, peer)
+		data, err := requestPieceFromPeer(peer, fmt.Sprintf("%d:%x\n", piece.Index, infoHash))
 
 		results <- PieceResult{
 			Index: piece.Index,
@@ -148,13 +140,19 @@ func mergePieces(fileName string, pieces map[int]string, numPieces int) error {
 }
 
 func requestPieceFromPeer(address, message string) (string, error) {
-	conn, err := net.Dial("tcp", address)
+	// Set a timeout for the connection
+	conn, err := net.DialTimeout("tcp", address, 60*time.Second)
 	if err != nil {
 		return "", fmt.Errorf("error connecting to peer: %v", err)
 	}
 	defer conn.Close()
 
-	message = "Requesting piece: " + message
+	// Set read/write deadlines
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	// Include infoHash in the request message
+	message = fmt.Sprintf("Requesting piece: %s\n", message)
+	fmt.Printf("Sending message: %s\n", message)
 	// Send request for the piece
 	_, err = conn.Write([]byte(message))
 	if err != nil {

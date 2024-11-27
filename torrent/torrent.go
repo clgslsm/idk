@@ -11,9 +11,6 @@ import (
 	"github.com/jackpal/bencode-go"
 )
 
-// Port to listen on
-const Port uint16 = 6881
-
 // TorrentFile encodes the metadata from a .torrent file
 type TorrentFile struct {
 	Announce    string
@@ -99,6 +96,25 @@ func (bto *bencodeTorrent) toTorrentFile() (TorrentFile, error) {
 	return t, nil
 }
 
+// splitFileIntoPieces reads a file and splits it into pieces of the given length.
+func splitFileIntoPieces(file *os.File, pieceLength int) ([][]byte, error) {
+	var pieces [][]byte
+	buf := make([]byte, pieceLength)
+	for {
+		n, err := file.Read(buf)
+		if n == 0 {
+			break
+		}
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		piece := make([]byte, n)
+		copy(piece, buf[:n])
+		pieces = append(pieces, piece)
+	}
+	return pieces, nil
+}
+
 // CreateTorrent builds a TorrentFile from a file path and tracker URL
 func CreateTorrent(path string, trackerURL string) (TorrentFile, error) {
 	file, err := os.Open(path)
@@ -122,23 +138,33 @@ func CreateTorrent(path string, trackerURL string) (TorrentFile, error) {
 		},
 	}
 
-	// Calculate pieces hashes
-	buf := make([]byte, bto.Info.PieceLength)
-	pieces := []byte{}
-	for {
-		n, err := file.Read(buf)
-		if n == 0 {
-			break
-		}
-		if err != nil && err != io.EOF {
-			return TorrentFile{}, err
-		}
-		piece := sha1.Sum(buf[:n])
-		pieces = append(pieces, piece[:]...)
+	// Use the new function to split the file into pieces
+	pieces, err := splitFileIntoPieces(file, bto.Info.PieceLength)
+	if err != nil {
+		return TorrentFile{}, err
 	}
-	bto.Info.Pieces = string(pieces)
+
+	// Calculate pieces hashes
+	var piecesHashes []byte
+	for _, piece := range pieces {
+		hash := sha1.Sum(piece)
+		piecesHashes = append(piecesHashes, hash[:]...)
+	}
+	bto.Info.Pieces = string(piecesHashes)
 
 	return bto.toTorrentFile()
+}
+
+// StreamFilePieces streams file pieces to a client without hashing
+func StreamFilePieces(filePath string, pieceLength int) ([][]byte, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Use the same function to split the file into pieces
+	return splitFileIntoPieces(file, pieceLength)
 }
 
 // Create saves a TorrentFile as a .torrent file
