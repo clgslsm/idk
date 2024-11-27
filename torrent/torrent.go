@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/jackpal/bencode-go"
 )
@@ -267,4 +268,66 @@ func (t *TorrentFile) ReadPiece(index int) ([]byte, error) {
 	}
 
 	return piece[:n], nil
+}
+
+// MergePieces combines pieces into a single file
+func (t *TorrentFile) MergePieces(outputPath string, pieces map[int]string) error {
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %v", err)
+	}
+	defer file.Close()
+
+	// Write pieces in order
+	for i := 0; i < len(t.PieceHashes); i++ {
+		data, exists := pieces[i]
+		if !exists {
+			return fmt.Errorf("missing piece %d", i)
+		}
+		if _, err := file.WriteString(data); err != nil {
+			return fmt.Errorf("failed to write piece %d: %v", i, err)
+		}
+	}
+
+	return nil
+}
+
+// TestSplitAndMerge tests the split and merge functionality
+func TestSplitAndMerge(filepath string) error {
+	// Create a temporary torrent file structure
+	t := &TorrentFile{
+		PieceLength: 256 * 1024, // 256KB pieces
+		Name:        filepath,
+	}
+
+	// Use StreamFilePieces to split the file
+	pieceBytes, err := StreamFilePieces(filepath, t.PieceLength)
+	if err != nil {
+		return fmt.Errorf("failed to split file: %v", err)
+	}
+
+	// Convert pieces to map and calculate hashes
+	pieces := make(map[int]string)
+	for i, piece := range pieceBytes {
+		pieces[i] = string(piece)
+		pieceHash := sha1.Sum(piece)
+		t.PieceHashes = append(t.PieceHashes, pieceHash)
+	}
+
+	// Get extension by splitting on dots and taking the last part
+	parts := strings.Split(filepath, ".")
+	var ext string
+	if len(parts) > 1 {
+		ext = "." + parts[len(parts)-1]
+	}
+	baseName := strings.TrimSuffix(filepath, ext)
+	outputPath := baseName + "-test" + ext
+
+	// Merge pieces back
+	if err := t.MergePieces(outputPath, pieces); err != nil {
+		return fmt.Errorf("merge failed: %v", err)
+	}
+
+	fmt.Printf("Successfully split and merged file:\nOriginal: %s\nNew: %s\n", filepath, outputPath)
+	return nil
 }

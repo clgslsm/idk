@@ -3,7 +3,6 @@ package server
 import (
 	"bufio"
 	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,38 +12,44 @@ import (
 	"tcp-app/torrent"
 )
 
-// pieceSize = 256KB
-const pieceSize = 256 * 1024
+type TorrentFile struct {
+	Announce    string
+	InfoHash    [20]byte
+	PieceHashes [][20]byte
+	PieceLength int
+	Length      int
+	Name        string
+}
 
 // FileWorker handles the file pieces for a specific torrent
 type FileWorker struct {
 	filePath    string
 	pieces      [][]byte
 	numPieces   int
-	pieceHashes []string
+	pieceHashes [][20]byte
 }
 
 // NewFileWorker creates and initializes a new FileWorker
 func NewFileWorker(filePath string) (*FileWorker, error) {
+	t := &TorrentFile{
+		PieceLength: 256 * 1024, // 256KB pieces
+	}
 	// Get pieces using the StreamFilePieces function
-	pieces, err := torrent.StreamFilePieces(filePath, pieceSize)
+	pieces, err := torrent.StreamFilePieces(filePath, t.PieceLength)
 	if err != nil {
 		return nil, fmt.Errorf("error streaming file pieces: %v", err)
 	}
 
-	numPieces := len(pieces)
-	pieceHashes := make([]string, numPieces)
-
-	// Calculate hashes for verification purposes
+	// Calculate piece hashes
+	pieceHashes := make([][20]byte, len(pieces))
 	for i, piece := range pieces {
-		hash := sha1.Sum(piece)
-		pieceHashes[i] = hex.EncodeToString(hash[:])
+		pieceHashes[i] = sha1.Sum(piece)
 	}
 
 	return &FileWorker{
 		filePath:    filePath,
 		pieces:      pieces,
-		numPieces:   numPieces,
+		numPieces:   len(pieces),
 		pieceHashes: pieceHashes,
 	}, nil
 }
@@ -158,10 +163,8 @@ func handleHandshake(conn net.Conn, message string) (string, *FileWorker) {
 }
 
 func handlePieceRequest(conn net.Conn, message string, worker *FileWorker) {
-	fmt.Printf("Received piece request: %s\n", message)
-
 	parts := strings.Split(message, ":")
-	if len(parts) != 2 {
+	if len(parts) != 3 {
 		conn.Write([]byte("ERROR: Invalid request format\n"))
 		return
 	}
@@ -173,7 +176,7 @@ func handlePieceRequest(conn net.Conn, message string, worker *FileWorker) {
 		return
 	}
 
-	// Send only the piece data to the client
-	conn.Write(worker.pieces[pieceIndex])
+	// Send the piece data with a delimiter
+	conn.Write(append(worker.pieces[pieceIndex], '\n'))
 	fmt.Printf("Sent piece data for index %d\n", pieceIndex)
 }

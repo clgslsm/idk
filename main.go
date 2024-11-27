@@ -29,6 +29,7 @@ func main() {
 	fmt.Println("  clear                    - Clear the terminal")
 	fmt.Println("  create [file]            - Create a torrent file from a source file")
 	fmt.Println("  open [torrent-file]      - Open and display torrent file contents")
+	fmt.Println("  test-file [filename]     - Test split and merge functionality")
 	for {
 		fmt.Print("> ") // CLI prompt
 		commandLine, _ := reader.ReadString('\n')
@@ -94,6 +95,17 @@ func main() {
 			}
 			torrentFile := args[1]
 			torrent.Open(torrentFile)
+		case strings.HasPrefix(commandLine, "check-file"):
+			args := strings.Split(commandLine, " ")
+			if len(args) < 2 {
+				fmt.Println("Usage: check-file <filename>")
+				return
+			}
+			filename := args[1]
+			if err := torrent.TestSplitAndMerge(filename); err != nil {
+				fmt.Printf("Test failed: %v\n", err)
+				return
+			}
 		default:
 			fmt.Println("Unknown command. Try again.")
 		}

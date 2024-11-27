@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -19,7 +18,7 @@ type PieceWork struct {
 
 type PieceResult struct {
 	Index int
-	Data  string
+	Data  []byte
 	Error error
 }
 
@@ -92,12 +91,12 @@ func StartDownload(torrentFile string) {
 			fmt.Printf("Error downloading piece %d: %v\n", result.Index, result.Error)
 			continue
 		}
-		piecesByIndex[result.Index] = result.Data
+		piecesByIndex[result.Index] = string(result.Data)
 		fmt.Printf("Successfully downloaded piece %d\n", result.Index)
 	}
 
 	// Merge pieces into final file
-	if err := mergePieces(tf.Name, piecesByIndex, len(tf.PieceHashes)); err != nil {
+	if err := tf.MergePieces(tf.Name, piecesByIndex); err != nil {
 		fmt.Printf("Error merging pieces: %v\n", err)
 		return
 	}
@@ -108,7 +107,7 @@ func StartDownload(torrentFile string) {
 func downloadWorker(peer string, work <-chan PieceWork, results chan<- PieceResult, infoHash []byte) {
 	for piece := range work {
 		fmt.Printf("Downloading piece %d from peer %s\n", piece.Index, peer)
-		data, err := requestPieceFromPeer(peer, fmt.Sprintf("%d:%x\n", piece.Index, infoHash))
+		data, err := requestPieceFromPeer(peer, piece.Index, infoHash)
 
 		results <- PieceResult{
 			Index: piece.Index,
@@ -118,56 +117,33 @@ func downloadWorker(peer string, work <-chan PieceWork, results chan<- PieceResu
 	}
 }
 
-func mergePieces(fileName string, pieces map[int]string, numPieces int) error {
-	file, err := os.Create(fileName)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %v", err)
-	}
-	defer file.Close()
-
-	// Write pieces in order
-	for i := 0; i < numPieces; i++ {
-		data, exists := pieces[i]
-		if !exists {
-			return fmt.Errorf("missing piece %d", i)
-		}
-		if _, err := file.WriteString(data); err != nil {
-			return fmt.Errorf("failed to write piece %d: %v", i, err)
-		}
-	}
-
-	return nil
-}
-
-func requestPieceFromPeer(address, message string) (string, error) {
-	// Set a timeout for the connection
+func requestPieceFromPeer(address string, pieceIndex int, infoHash []byte) ([]byte, error) {
 	conn, err := net.DialTimeout("tcp", address, 60*time.Second)
 	if err != nil {
-		return "", fmt.Errorf("error connecting to peer: %v", err)
+		return nil, fmt.Errorf("error connecting to peer: %v", err)
 	}
 	defer conn.Close()
 
-	// Set read/write deadlines
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
-
-	// Include infoHash in the request message
-	message = fmt.Sprintf("Requesting piece: %s\n", message)
-	fmt.Printf("Sending message: %s\n", message)
-	// Send request for the piece
-	_, err = conn.Write([]byte(message))
-	if err != nil {
-		return "", fmt.Errorf("error sending request: %v", err)
+	// First perform handshake if not already done
+	if err := performHandshake(address, infoHash); err != nil {
+		return nil, fmt.Errorf("handshake failed: %v", err)
 	}
 
-	// Read response from the peer
+	// Request the piece
+	message := fmt.Sprintf("Requesting piece:%d:%x\n", pieceIndex, infoHash)
+	if _, err := conn.Write([]byte(message)); err != nil {
+		return nil, fmt.Errorf("error sending request: %v", err)
+	}
+
+	// Read the piece data
 	reader := bufio.NewReader(conn)
-	response, err := reader.ReadString('\n')
+	data, err := reader.ReadBytes('\n')
 	if err != nil {
-		return "", fmt.Errorf("error reading response: %v", err)
+		return nil, fmt.Errorf("error reading piece data: %v", err)
 	}
 
-	fmt.Printf("Response from peer: %s", response)
-	return response, nil
+	// Remove the trailing newline
+	return data[:len(data)-1], nil
 }
 
 func TestConnection(address string) error {
